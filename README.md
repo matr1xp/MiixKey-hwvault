@@ -1,4 +1,4 @@
-# MiixKey hwvault
+# MiixKey: hwvault
 
 **Encrypt files so they can only be decrypted with a physical touch on a FIDO2 hardware key.**
 
