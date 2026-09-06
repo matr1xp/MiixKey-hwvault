@@ -1,0 +1,47 @@
+#compdef hwvault
+# zsh completion for hwvault — hardware-bound secrets vault
+
+_hwvault() {
+  local -a commands
+  commands=(
+    'init:set up both recipients (FIDO + backup)'
+    'encrypt:encrypt a file to both recipients, remove plaintext'
+    'decrypt:decrypt via MiixKey (PIN + touch) to stdout'
+    'recover:decrypt via backup identity (no hardware)'
+    'edit:decrypt, open in $EDITOR, re-encrypt'
+    'exec:inject KEY=VALUE lines as env vars into a command'
+    'status:tooling, recipients, hardware, recipient audit'
+    'help:show usage'
+  )
+
+  _arguments -C \
+    '1: :->cmd' \
+    '*:: :->args'
+
+  case $state in
+    cmd)
+      _describe -t commands 'hwvault command' commands
+      ;;
+    args)
+      case $words[1] in
+        encrypt)
+          # any file that is not already encrypted
+          _files -g '*~*.age'
+          ;;
+        decrypt|recover|edit)
+          _files -g '*.age'
+          ;;
+        exec)
+          if (( CURRENT == 2 )); then
+            _files -g '*.age'
+          else
+            # after the .age file, complete an external command
+            _command_names -e
+          fi
+          ;;
+      esac
+      ;;
+  esac
+}
+
+_hwvault "$@"

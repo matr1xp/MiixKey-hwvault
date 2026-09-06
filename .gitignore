@@ -1,0 +1,17 @@
+# Never commit private key material — even though the recovery key is
+# kept offline, this is a hard stop in case a copy ever reappears on disk.
+recipients/recovery-key.txt
+recipients/*recovery*key*
+*.key
+*.pem
+
+# macOS noise
+.DS_Store
+
+# Scratch / temp artifacts
+*.age.tmp
+*.swp
+# FIDO credential handle is machine-local by policy (recipients/README.md).
+# Publishing the handle + upstream's stolen-identity caveat is a wider
+# exposure than the chat transcript that burned the previous credential.
+recipients/fido-identity.txt

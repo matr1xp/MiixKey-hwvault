@@ -1,0 +1,341 @@
+#!/usr/bin/env bash
+# hwvault — hardware-bound secrets vault (see SPEC.md)
+#
+# Encrypts files so decryption requires a physical touch on a FIDO2 key,
+# while always keeping a plugin-independent recovery recipient (SPEC §7, §10).
+set -euo pipefail
+
+VERSION="0.1.0"
+
+# ---------------------------------------------------------------- config ----
+VAULT_DIR="${HWVAULT_DIR:-$HOME/workspace/Projects/MiixKey}"
+RECIP_DIR="$VAULT_DIR/recipients"
+FIDO_PUB="$RECIP_DIR/fido.pub"
+FIDO_ID="$RECIP_DIR/fido-identity.txt"
+RECOVERY_PUB="$RECIP_DIR/recovery.pub"
+RECOVERY_ID="$RECIP_DIR/recovery-key.txt"
+
+# ------------------------------------------------------------------ ui ------
+readonly C_RED=$'\033[31m' C_GRN=$'\033[32m' C_YEL=$'\033[33m' C_DIM=$'\033[2m' C_OFF=$'\033[0m'
+die()  { printf '%shwvault: %s%s\n' "$C_RED" "$*" "$C_OFF" >&2; exit 1; }
+warn() { printf '%swarning: %s%s\n' "$C_YEL" "$*" "$C_OFF" >&2; }
+ok()   { printf '%s✓%s %s\n' "$C_GRN" "$C_OFF" "$*"; }
+info() { printf '%s%s%s\n' "$C_DIM" "$*" "$C_OFF"; }
+
+need() { command -v "$1" >/dev/null 2>&1 || die "required tool not found: $1"; }
+
+# A decrypt needs a real terminal for the PIN prompt. Failing early with a clear
+# message beats age's misleading "could not read value / not a terminal".
+require_tty() {
+  # /dev/tty can EXIST but not be openable (automated tool sessions), so test an
+  # actual open rather than -e. Otherwise age fails later with a confusing
+  # "could not read value / timed out waiting for device".
+  { [[ -t 0 ]] || (: < /dev/tty) 2>/dev/null; } || die \
+"no TTY available — the FIDO PIN prompt needs a real terminal.
+  Run this from Terminal/iTerm, or in Claude Code prefix with '! '.
+  (Automated tool sessions cannot supply the PIN.)"
+}
+
+# --------------------------------------------------------- recipients ------
+# Every encryption targets BOTH recipients. A single-recipient vault is a bug,
+# not a configuration (SPEC §7).
+recipient_args() {
+  local -a args=()
+  [[ -s "$FIDO_PUB"   ]] && args+=(-R "$FIDO_PUB")
+  [[ -s "$RECOVERY_PUB" ]] && args+=(-R "$RECOVERY_PUB")
+  (( ${#args[@]} >= 4 )) || die \
+"refusing to encrypt with fewer than 2 recipients (SPEC §7).
+  Losing the hardware key with no recovery recipient means permanent data loss.
+  Run 'hwvault init' to set both up."
+  printf '%s\n' "${args[@]}"
+}
+
+count_stanzas() {  # how many recipients can open this file
+  head -c 4096 "$1" 2>/dev/null | LC_ALL=C grep -c '^-> ' || true
+}
+
+# ------------------------------------------------------------ commands ------
+cmd_init() {
+  need age; need age-keygen
+  mkdir -p "$RECIP_DIR"
+
+  # The recovery PRIVATE key is expected to be absent once it has been moved
+  # offline (SPEC §10 ③) — that is the goal state, not a missing file. Only the
+  # public key is needed to encrypt. Regenerating here would silently orphan the
+  # offline key and every file encrypted to it, so key on the .pub alone.
+  if [[ -s "$RECOVERY_PUB" ]]; then
+    if [[ -s "$RECOVERY_ID" ]]; then
+      info "recovery key present (still on local disk — move it offline)"
+    else
+      ok "recovery recipient: $(cat "$RECOVERY_PUB")"
+      info "recovery private key is offline — encryption unaffected, as intended"
+    fi
+  else
+    info "creating plugin-independent recovery key (SPEC §10 ③)…"
+    age-keygen -o "$RECOVERY_ID" 2>&1 | grep -o 'age1[a-z0-9]*' > "$RECOVERY_PUB"
+    chmod 600 "$RECOVERY_ID"; chmod 644 "$RECOVERY_PUB"
+    ok "recovery recipient: $(cat "$RECOVERY_PUB")"
+  fi
+
+  if [[ -s "$FIDO_PUB" ]]; then
+    info "FIDO recipient already present"
+  else
+    need age-plugin-fido2-hmac
+    require_tty
+    cat <<EOF
+
+Creating the FIDO2 credential. Before continuing:
+  • MiixKey plugged in and unlocked
+  • NRF mode = NFC+BT  (not Chameleon — that disables FIDO)
+  • Quit Chrome / Edge / Comet (they hold the FIDO device exclusively)
+
+EOF
+    read -r -p "Ready? [y/N] " reply
+    [[ "$reply" =~ ^[Yy]$ ]] || die "aborted"
+    age-plugin-fido2-hmac -g > "$FIDO_ID"
+    chmod 600 "$FIDO_ID"
+    grep -o 'age1[a-z0-9]*' "$FIDO_ID" | head -1 > "$FIDO_PUB"
+    [[ -s "$FIDO_PUB" ]] || die "could not extract recipient from generated identity"
+    ok "FIDO recipient: $(cat "$FIDO_PUB")"
+  fi
+
+  echo
+  recipient_args >/dev/null && ok "init complete — 2 recipients configured"
+  warn "keep $RECOVERY_ID offline (print it, or store on removable media) before"
+  warn "trusting this vault with anything irreplaceable — SPEC §10 gate"
+}
+
+cmd_encrypt() {
+  need age
+  local src="${1:?usage: hwvault encrypt <file>}"
+  [[ -f "$src" ]] || die "no such file: $src"
+  [[ "$src" == *.age ]] && die "already encrypted: $src"
+  local out="$src.age"
+  [[ -e "$out" ]] && die "refusing to overwrite existing: $out"
+
+  local -a rargs; mapfile -t rargs < <(recipient_args)
+
+  # Encrypt to a temp file first, so an interrupted run cannot leave a
+  # truncated .age next to a deleted original.
+  local tmp; tmp="$(mktemp "${out}.XXXXXX")"
+  if ! age "${rargs[@]}" -o "$tmp" "$src"; then
+    rm -f "$tmp"; die "encryption failed"
+  fi
+
+  # Verify before destroying the original — never trust an unverified write.
+  local n; n="$(count_stanzas "$tmp")"
+  (( n >= 2 )) || { rm -f "$tmp"; die "sanity check failed: $n recipient(s) in output, expected ≥2"; }
+
+  mv "$tmp" "$out"
+  ok "encrypted → $out  ($n recipients)"
+
+  info "removing plaintext original…"
+  if command -v shred >/dev/null 2>&1; then
+    # Best-effort only: on APFS (copy-on-write + snapshots) overwriting blocks
+    # does NOT guarantee the old data is unrecoverable.
+    shred -u "$src" 2>/dev/null || rm -f "$src"
+  else
+    rm -f "$src"
+  fi
+  ok "original removed: $src"
+  info "note: on APFS, secure erase is not guaranteed — assume prior copies may persist"
+}
+
+cmd_decrypt() {
+  need age
+  local enc="${1:?usage: hwvault decrypt <file.age>}"
+  [[ -f "$enc" ]] || die "no such file: $enc"
+  require_tty
+  [[ -s "$FIDO_ID" ]] || die "no FIDO identity at $FIDO_ID — run 'hwvault init'"
+  age -d -i "$FIDO_ID" "$enc"
+}
+
+cmd_recover() {
+  need age
+  local enc="${1:?usage: hwvault recover <file.age>}"
+  [[ -f "$enc" ]] || die "no such file: $enc"
+  [[ -s "$RECOVERY_ID" ]] || die "no recovery key at $RECOVERY_ID"
+  warn "using the RECOVERY key (no hardware). Prefer 'decrypt' for routine use."
+  age -d -i "$RECOVERY_ID" "$enc"
+}
+
+cmd_edit() {
+  need age
+  local enc="${1:?usage: hwvault edit <file.age>}"
+  [[ -f "$enc" ]] || die "no such file: $enc"
+  require_tty
+  [[ -s "$FIDO_ID" ]] || die "no FIDO identity at $FIDO_ID — run 'hwvault init'"
+  local editor="${EDITOR:-${VISUAL:-vi}}"
+
+  local -a rargs; mapfile -t rargs < <(recipient_args)
+
+  # macOS has no tmpfs by default, so the plaintext WILL touch disk here.
+  # Mitigate: mode 600, in TMPDIR, removed on every exit path including signals.
+  local tmp; tmp="$(mktemp "${TMPDIR:-/tmp}/hwvault.XXXXXXXX")"
+  chmod 600 "$tmp"
+  # shellcheck disable=SC2064  # expand $tmp now, deliberately
+  trap "shred -u '$tmp' 2>/dev/null || rm -f '$tmp'" EXIT INT TERM HUP
+
+  age -d -i "$FIDO_ID" "$enc" > "$tmp" || die "decryption failed"
+  local before; before="$(shasum -a256 "$tmp" | awk '{print $1}')"
+
+  "$editor" "$tmp"
+
+  local after; after="$(shasum -a256 "$tmp" | awk '{print $1}')"
+  if [[ "$before" == "$after" ]]; then
+    info "no changes — leaving $enc untouched"
+    return 0
+  fi
+
+  local newtmp; newtmp="$(mktemp "${enc}.XXXXXX")"
+  if ! age "${rargs[@]}" -o "$newtmp" "$tmp"; then
+    rm -f "$newtmp"; die "re-encryption failed — original left intact"
+  fi
+  local n; n="$(count_stanzas "$newtmp")"
+  (( n >= 2 )) || { rm -f "$newtmp"; die "sanity check failed: $n recipient(s), expected ≥2"; }
+
+  mv "$newtmp" "$enc"
+  ok "updated $enc ($n recipients)"
+  info "note: plaintext was written to $TMPDIR during editing — APFS erase is best-effort"
+}
+
+cmd_exec() {
+  need age
+  local enc="${1:?usage: hwvault exec <file.age> -- <command> [args…]}"; shift
+  [[ -f "$enc" ]] || die "no such file: $enc"
+  [[ "${1:-}" == "--" ]] && shift
+  (( $# )) || die "no command given — usage: hwvault exec <file.age> -- <command> [args…]"
+  require_tty
+  [[ -s "$FIDO_ID" ]] || die "no FIDO identity at $FIDO_ID — run 'hwvault init'"
+
+  # Decrypt into a variable, never a file. Command substitution keeps the
+  # plaintext in this process's memory only; the child receives it via env.
+  local content
+  content="$(age -d -i "$FIDO_ID" "$enc")" || die "decryption failed"
+
+  # Parse dotenv-style KEY=VALUE. Skips blanks/comments; tolerates `export `
+  # prefixes and surrounding quotes. Anything unparseable is reported, not
+  # silently dropped — a missing secret should fail loudly.
+  local -a envs=()
+  local line key val n=0
+  while IFS= read -r line; do
+    n=$((n+1))
+    [[ -z "${line//[[:space:]]/}" ]] && continue        # blank
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue          # comment
+    line="${line#"${line%%[![:space:]]*}"}"              # ltrim
+    line="${line#export }"
+    [[ "$line" == *=* ]] || { warn "line $n: not KEY=VALUE, skipped"; continue; }
+    key="${line%%=*}"; val="${line#*=}"
+    key="${key%"${key##*[![:space:]]}"}"                 # rtrim key
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { warn "line $n: invalid var name '$key', skipped"; continue; }
+    # strip one layer of matching quotes
+    if [[ "$val" == \"*\" || "$val" == \'*\' ]]; then val="${val:1:${#val}-2}"; fi
+    envs+=("$key=$val")
+  done <<< "$content"
+  unset content
+
+  (( ${#envs[@]} )) || die "no usable KEY=VALUE pairs found in $enc"
+  info "injecting ${#envs[@]} variable(s) into: $*"
+
+  # `env` replaces this process, so the values never persist beyond the child.
+  exec env "${envs[@]}" "$@"
+}
+
+cmd_status() {
+  echo "hwvault $VERSION"
+  echo "vault: $VAULT_DIR"
+  echo
+
+  echo "Tooling:"
+  for t in age age-plugin-fido2-hmac; do
+    if command -v "$t" >/dev/null 2>&1; then
+      printf '  %s✓%s %-24s %s\n' "$C_GRN" "$C_OFF" "$t" "$("$t" --version 2>/dev/null | head -1)"
+    else
+      printf '  %s✗%s %-24s not installed\n' "$C_RED" "$C_OFF" "$t"
+    fi
+  done
+  echo
+
+  echo "Recipients:"
+  [[ -s "$FIDO_PUB" ]]   && printf '  %s✓%s fido    %s\n' "$C_GRN" "$C_OFF" "$(cat "$FIDO_PUB")" \
+                         || printf '  %s✗%s fido    missing\n' "$C_RED" "$C_OFF"
+  [[ -s "$RECOVERY_PUB" ]] && printf '  %s✓%s recovery %s\n' "$C_GRN" "$C_OFF" "$(cat "$RECOVERY_PUB")" \
+                         || printf '  %s✗%s recovery missing\n' "$C_RED" "$C_OFF"
+  echo
+
+  echo "Hardware:"
+  local n
+  n="$(ioreg -w0 -l -r -n MiixKey 2>/dev/null | grep -c '61904' || true)"
+  if (( n > 0 )); then
+    printf '  %s✓%s MiixKey present (FIDO interface detected)\n' "$C_GRN" "$C_OFF"
+  else
+    printf '  %s—%s MiixKey not detected — decrypt will time out\n' "$C_YEL" "$C_OFF"
+    printf '    check: plugged in, unlocked, NRF mode = NFC+BT (not Chameleon)\n'
+  fi
+  echo
+
+  # The audit that matters: any file only one recipient can open is a
+  # single point of permanent loss.
+  # NOTE: only scans VAULT_DIR. Files encrypted elsewhere (hwvault works on any
+  # path) are NOT audited here — set HWVAULT_DIR or check them manually.
+  echo "Encrypted files (scanned: $VAULT_DIR):"
+  local found=0 risky=0
+  while IFS= read -r -d '' f; do
+    found=1
+    local c; c="$(count_stanzas "$f")"
+    if (( c < 2 )); then
+      printf '  %s⚠%s  %-50s %s recipient — SINGLE POINT OF LOSS\n' "$C_YEL" "$C_OFF" "${f#$VAULT_DIR/}" "$c"
+      risky=1
+    else
+      printf '  %s✓%s  %-50s %s recipients\n' "$C_GRN" "$C_OFF" "${f#$VAULT_DIR/}" "$c"
+    fi
+  done < <(find "$VAULT_DIR" -name '*.age' -type f -print0 2>/dev/null | sort -z)
+  (( found )) || info "  (none found under $VAULT_DIR)"
+  (( risky )) && { echo; warn "re-encrypt flagged files with 2 recipients (SPEC §7)"; }
+
+  # Gate reminder — this vault must not hold sole-copy secrets yet.
+  echo
+  if [[ -s "$RECOVERY_ID" ]]; then
+    warn "recovery key is on local disk at $RECOVERY_ID"
+    warn "move it offline before trusting this vault with real secrets (SPEC §10)"
+  elif [[ -s "$RECOVERY_PUB" ]]; then
+    printf '  %s✓%s recovery key is offline — `recover` needs the offline copy\n' "$C_GRN" "$C_OFF"
+  fi
+}
+
+usage() {
+  cat <<EOF
+hwvault $VERSION — hardware-bound secrets vault
+
+  hwvault init                 set up both recipients (FIDO + backup)
+  hwvault encrypt <file>       encrypt to both recipients, remove plaintext
+  hwvault decrypt <file.age>   decrypt via MiixKey (PIN + touch) → stdout
+  hwvault edit <file.age>      decrypt → \$EDITOR → re-encrypt
+  hwvault exec <file.age> -- <cmd>
+                               inject KEY=VALUE lines as env vars into <cmd>
+  hwvault recover <file.age>   decrypt via backup identity (no hardware)
+  hwvault status               tooling, recipients, hardware, recipient audit
+
+Decrypt requires a real terminal for the PIN prompt.
+See SPEC.md for the threat model (§6), recovery policy (§7) and the
+pre-1.0 dependency gate (§10).
+EOF
+}
+
+main() {
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    init)     cmd_init "$@" ;;
+    edit)     cmd_edit "$@" ;;
+    exec)     cmd_exec "$@" ;;
+    encrypt)  cmd_encrypt "$@" ;;
+    decrypt)  cmd_decrypt "$@" ;;
+    recover)  cmd_recover "$@" ;;
+    status)   cmd_status "$@" ;;
+    -h|--help|help|"") usage ;;
+    -v|--version) echo "$VERSION" ;;
+    *) die "unknown command: $cmd (try 'hwvault help')" ;;
+  esac
+}
+
+main "$@"
