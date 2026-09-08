@@ -8,14 +8,38 @@ loadkeys() {
   # The trim patterns below need EXTENDED_GLOB; localoptions keeps it scoped to
   # this function so the user's shell settings are untouched.
   setopt localoptions extendedglob
-  local vault="${HWVAULT_ENV:-$HOME/.env.age}"
+
+  # Vault resolution order (first hit wins):
+  #   1. explicit argument          → loadkeys ~/work/project/.env.age
+  #   2. $HWVAULT_ENV               → per-shell override
+  #   3. ./.env.age                 → project-local, any directory
+  #   4. $HOME/.env.age             → the original global default
+  # Explicit > environment > project-local > global means an automated tool can
+  # pin (2), a project dir gets (3), and plain `loadkeys` at home still gets (4).
+  local vault="${1:-}"
+  [[ -n "$vault" ]] || vault="${HWVAULT_ENV:-}"
+  if [[ -z "$vault" ]]; then
+    if [[ -f ./.env.age ]]; then
+      vault="./.env.age"
+    else
+      vault="$HOME/.env.age"
+    fi
+  fi
   if [[ ! -f "$vault" ]]; then
     print -u2 "loadkeys: no encrypted env at $vault"
+    print -u2 "loadkeys: encrypt one with: hwvault encrypt <path>/.env"
     return 1
   fi
+  # Per-vault loaded-state: the same shell may hold keys from several projects,
+  # so a vault that's already been loaded no-ops while others still load.
+  # HWVAULT_LOADED_VAULTS holds resolved absolute paths, space-separated.
+  local abs_vault
+  abs_vault="${vault:A}"
   if [[ -n "${HWVAULT_KEYS_LOADED:-}" ]]; then
-    print "loadkeys: already loaded in this shell (unset HWVAULT_KEYS_LOADED to reload)"
-    return 0
+    if [[ " ${HWVAULT_LOADED_VAULTS:-} " == *" $abs_vault "* ]]; then
+      print "loadkeys: $vault already loaded in this shell (unloadkeys to clear)"
+      return 0
+    fi
   fi
 
   local content
@@ -44,10 +68,20 @@ loadkeys() {
   unset content
 
   # Record the names (not values) so unloadkeys can clear them without
-  # decrypting again — works with the token unplugged.
-  export HWVAULT_LOADED_NAMES="${names# }"
+  # decrypting again — works with the token unplugged. Names accumulate across
+  # vaults in this shell; a name loaded by two vaults is cleared once.
+  if [[ -n "${HWVAULT_LOADED_NAMES:-}" ]]; then
+    export HWVAULT_LOADED_NAMES="${HWVAULT_LOADED_NAMES} ${names# }"
+  else
+    export HWVAULT_LOADED_NAMES="${names# }"
+  fi
+  if [[ -n "${HWVAULT_LOADED_VAULTS:-}" ]]; then
+    export HWVAULT_LOADED_VAULTS="${HWVAULT_LOADED_VAULTS} $abs_vault"
+  else
+    export HWVAULT_LOADED_VAULTS="$abs_vault"
+  fi
   export HWVAULT_KEYS_LOADED=1
-  print "loadkeys: exported $n key(s) into this shell"
+  print "loadkeys: exported $n key(s) from $vault into this shell"
 }
 
 # Drop the keys again without closing the shell.
@@ -68,16 +102,24 @@ unloadkeys() {
     [[ -n "$k" ]] || continue
     unset "$k" && (( n++ ))
   done
-  unset HWVAULT_KEYS_LOADED HWVAULT_LOADED_NAMES
+  unset HWVAULT_KEYS_LOADED HWVAULT_LOADED_NAMES HWVAULT_LOADED_VAULTS
   print "unloadkeys: cleared $n key(s) from this shell"
 }
 
 # Startup hint. Shown only when there is something to load and it isn't loaded
 # yet, so it stays quiet in shells that already have keys — and never blocks.
+# Mirrors loadkeys' resolution: explicit env override, then a project-local
+# ./.env.age, then the global default.
 _hwvault_hint() {
   [[ -o interactive ]] || return          # never in scripts
   [[ -z "${HWVAULT_KEYS_LOADED:-}" ]] || return
-  [[ -f "${HWVAULT_ENV:-$HOME/.env.age}" ]] || return
+  if [[ -n "${HWVAULT_ENV:-}" ]]; then
+    [[ -f "$HWVAULT_ENV" ]] || return
+  elif [[ -f ./.env.age || -f "$HOME/.env.age" ]]; then
+    :
+  else
+    return
+  fi
   print -P "%F{yellow}🔑 API keys are encrypted — run %B loadkeys %b to load them.%f"
 }
 # NOTE: intentionally NOT called here. ~/.zshrc invokes _hwvault_hint as its
