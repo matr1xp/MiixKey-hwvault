@@ -1,0 +1,127 @@
+# Release pipeline for hwvault (issue #1).
+#
+# Triggered by pushing a v* tag (e.g. v0.1.1). Runs the same unattended
+# test gate as CI, then publishes a GitHub Release whose primary artifact is
+# bin/hwvault — the single-file CLI, no build step needed.
+#
+# Artifacts per release:
+#   hwvault            — the CLI itself (executable)
+#   hwvault.sha256     — digest for manual verification
+#   hwvault.sig        — SSH signature made with the repo's signing key
+#                        (same key that signs commits; verify with
+#                        ssh-keygen -Y verify against allowed_signers or the
+#                        GitHub account's SSH signing keys)
+#
+# age is pinned (v1.3.2 — same version as vendor/PINNED.md) and verified by
+# SHA-256, in line with the project's pinned-toolchain policy (§10).
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # create the release
+
+env:
+  AGE_VERSION: v1.3.2
+  AGE_SHA256: cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10
+
+jobs:
+  release:
+    name: Test, then release bin/hwvault
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Install pinned age (with SHA-256 verification)
+        run: |
+          set -euo pipefail
+          url="https://github.com/FiloSottile/age/releases/download/${AGE_VERSION}/age-${AGE_VERSION}-linux-amd64.tar.gz"
+          curl -fsSL "$url" -o /tmp/age.tar.gz
+          echo "${AGE_SHA256}  /tmp/age.tar.gz" | sha256sum --check --strict
+          tar -xzf /tmp/age.tar.gz -C /tmp
+          sudo install -m 0755 "/tmp/age/age" "/tmp/age/age-keygen" /usr/local/bin/
+          age --version
+
+      - name: Run test suite
+        run: |
+          bash test/test_hwvault.sh
+
+      - name: Prepare artifacts
+        id: artifacts
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          # bin/hwvault is the release target (issue #1). Strip nothing — it
+          # is a self-contained bash script; ship it exactly as tested.
+          install -m 0755 bin/hwvault "dist/hwvault"
+          sha256sum dist/hwvault > dist/hwvault.sha256
+          # Provenance metadata: the tag and the exact commit that was tested.
+          {
+            echo "hwvault $TAG"
+            echo "commit: $GITHUB_SHA"
+            echo "built:  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "tests:  test/test_hwvault.sh (unattended suite, 53 assertions)"
+          } > dist/hwvault.provenance
+          cat dist/hwvault.sha256
+          cat dist/hwvault.provenance
+
+      - name: Sign artifacts with repository SSH signing key
+        env:
+          SIGNING_KEY: ${{ secrets.HWVAULT_SSH_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEY:-}" ]; then
+            echo '::warning::HWVAULT_SSH_SIGNING_KEY secret not set — publishing digest only, no signature.'
+            exit 0
+          fi
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$SIGNING_KEY" > ~/.ssh/hwvault_signing_key
+          chmod 600 ~/.ssh/hwvault_signing_key
+          ssh-keygen -Y sign -f ~/.ssh/hwvault_signing_key -n file dist/hwvault
+          rm ~/.ssh/hwvault_signing_key
+
+      - name: Create GitHub Release with artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          assets=(dist/hwvault dist/hwvault.sha256 dist/hwvault.provenance)
+          if [ -f dist/hwvault.sig ]; then assets+=(dist/hwvault.sig); fi
+          gh release create "$TAG" "${assets[@]}" \
+            --title "hwvault ${TAG}" \
+            --verify-tag \
+            --notes "## hwvault ${TAG}
+
+          Release artifact: \`hwvault\` — the single-file CLI (\`bin/hwvault\` at tag ${TAG}).
+
+          This release passed the unattended test suite (53 assertions,
+          \`test/test_hwvault.sh\`) before publishing. The FIDO hardware paths
+          (PIN + touch) are verified separately on-device via \`test/RUN-THESE.sh\`;
+          see SPEC §9 for why they cannot run in CI.
+
+          ### Verify the artifact
+          \`\`\`
+          sha256sum -c hwvault.sha256
+          \`\`\`
+
+          If the \`.sig\` file is attached, the artifact is SSH-signed with the
+          same key that signs this repository's commits. Verify against the
+          owner's GitHub SSH signing keys:
+          \`\`\`
+          ssh-keygen -Y verify -f hwvault -I <owner-email> \\
+            -n file -s hwvault.sig <(ssh-keygen -P '' -f <(curl -fsSL \\
+            https://github.com/matr1xp.keys))
+          \`\`\`
+
+          ### Install
+          \`\`\`
+          install -m 0755 hwvault ~/.local/bin/hwvault
+          \`\`\`
+          Requires \`age\` (v1.3.2 pinned, see vendor/PINNED.md) and
+          \`age-plugin-fido2-hmac\` v0.5.0 for FIDO operations."

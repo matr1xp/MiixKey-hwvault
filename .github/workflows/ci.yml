@@ -1,0 +1,54 @@
+# CI: unattended test suite for bin/hwvault.
+#
+# The suite (test/test_hwvault.sh, 53 assertions) runs fully unattended: every
+# test exercises the BACKUP/recovery identity, which needs no FIDO hardware
+# and no TTY. The FIDO paths (PIN + touch) are covered by test/RUN-THESE.sh
+# on a real machine and cannot be automated — see SPEC §9.
+#
+# age is pinned (v1.3.2 — same version as vendor/PINNED.md) and verified by
+# SHA-256, in line with the project's pinned-toolchain policy (§10).
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  AGE_VERSION: v1.3.2
+  AGE_SHA256: cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10
+
+jobs:
+  test:
+    name: Unattended test suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Install pinned age (with SHA-256 verification)
+        run: |
+          set -euo pipefail
+          url="https://github.com/FiloSottile/age/releases/download/${AGE_VERSION}/age-${AGE_VERSION}-linux-amd64.tar.gz"
+          curl -fsSL "$url" -o /tmp/age.tar.gz
+          echo "${AGE_SHA256}  /tmp/age.tar.gz" | sha256sum --check --strict
+          tar -xzf /tmp/age.tar.gz -C /tmp
+          sudo install -m 0755 "/tmp/age/age" "/tmp/age/age-keygen" /usr/local/bin/
+          age --version
+
+      - name: Run test suite
+        run: |
+          bash test/test_hwvault.sh
+
+      - name: Upload test log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-log
+          path: |
+            /tmp/age.tar.gz
+          if-no-files-found: ignore
