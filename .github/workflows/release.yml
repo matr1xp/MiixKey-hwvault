@@ -59,7 +59,10 @@ jobs:
           # bin/hwvault is the release target (issue #1). Strip nothing — it
           # is a self-contained bash script; ship it exactly as tested.
           install -m 0755 bin/hwvault "dist/hwvault"
-          sha256sum dist/hwvault > dist/hwvault.sha256
+          # Name the FILE as downloaded (not the build path "dist/hwvault"),
+          # so `sha256sum -c hwvault.sha256` works verbatim from the release
+          # page's download directory.
+          (cd dist && sha256sum hwvault > hwvault.sha256)
           # Provenance metadata: the tag and the exact commit that was tested.
           {
             echo "hwvault $TAG"
