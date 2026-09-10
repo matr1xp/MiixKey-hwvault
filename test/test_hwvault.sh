@@ -234,13 +234,24 @@ rm -f "$SANDBOX/single.age"
 
 echo
 echo "── isolation ────────────────────────────────────────"
-# HWVAULT_DIR must fully redirect the vault; the real one stays untouched.
-REAL="$HOME/workspace/Projects/MiixKey/recipients/fido.pub"
-if [[ -f "$REAL" ]]; then
-  ok_contains "HWVAULT_DIR isolates from the real vault" "$SANDBOX" "$(hv status 2>&1 | strip_ansi)"
-  t_start "real vault recipients untouched by the suite"
-  if grep -q "$(cat "$REAL")" <<<"$STATUS"; then t_fail "sandbox status leaked the real recipient"; else t_pass; fi
-fi
+# HWVAULT_DIR must fully redirect the vault; a default-path vault must stay
+# untouched. Self-contained: a stand-in "real" vault is provisioned under a
+# fake $HOME, so the check runs on ANY machine (the old version peeked at
+# $HOME/workspace/Projects/MiixKey directly and silently skipped both tests
+# wherever that path didn't exist — e.g. CI).
+FAKEHOME="$SANDBOX/fake-home"
+FAKE_REAL="$FAKEHOME/workspace/Projects/MiixKey"
+mkdir -p "$FAKE_REAL/recipients"
+age-keygen -o "$FAKE_REAL/recipients/fido-identity.txt" 2>&1 \
+  | grep -o 'age1[a-z0-9]*' > "$FAKE_REAL/recipients/fido.pub"
+chmod 600 "$FAKE_REAL/recipients/fido-identity.txt"
+REAL_FIDO="$(cat "$FAKE_REAL/recipients/fido.pub")"
+# HWVAULT_DIR is exported for the whole suite; even against a $HOME that
+# HOLDS a default-path vault, status must report the sandbox.
+ok_contains "HWVAULT_DIR isolates from the default-path vault" "$SANDBOX" \
+  "$(HOME="$FAKEHOME" hv status 2>&1 | strip_ansi)"
+t_start "other vault's recipients untouched by the suite"
+if grep -q "$REAL_FIDO" <<<"$STATUS"; then t_fail "sandbox status leaked the other vault's recipient"; else t_pass; fi
 
 # ------------------------------------------------------------------ summary --
 echo
