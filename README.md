@@ -96,7 +96,7 @@ ships v1.0.0.
 
 ## Testing
 
-- `test/test_hwvault.sh` — 61 assertions, fully unattended, runs in an isolated
+- `test/test_hwvault.sh` — 75 assertions, fully unattended, runs in an isolated
   sandbox (`HWVAULT_DIR`) so it never touches real recipients. Mutation-tested: two
   initially-undetected mutations (a weakened guard, a removed verification step) are
   now explicitly covered.

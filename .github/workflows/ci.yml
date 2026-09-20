@@ -1,6 +1,6 @@
 # CI: unattended test suite for bin/hwvault.
 #
-# The suite (test/test_hwvault.sh, 61 assertions) runs fully unattended: every
+# The suite (test/test_hwvault.sh, 75 assertions) runs fully unattended: every
 # test exercises the BACKUP/recovery identity, which needs no FIDO hardware
 # and no TTY. The FIDO paths (PIN + touch) are covered by test/RUN-THESE.sh
 # on a real machine and cannot be automated — see SPEC §9.

@@ -108,5 +108,30 @@ else
 fi
 
 echo
+echo "=== TEST 6: exec refuses PATH / DYLD_* injection, keeps good vars ==="
+# PATH= would change which binary env runs; DYLD_* would hijack the loader.
+# Both are parse-time refusals (warnings, not failures) — the good variables
+# must still reach the child.
+cat > "$TMP/exec.env" <<'ENVEOF'
+GOODVAR=hwvault-exec-ok
+PATH=/usr/bin:/bin
+DYLD_INSERT_LIBRARIES=/tmp/evil.dylib
+export GOODVAR2="second"
+ENVEOF
+age -R "$R/fido.pub" -R "$R/recovery.pub" -o "$TMP/exec.env.age" "$TMP/exec.env" \
+  || { echo "could not encrypt exec fixture"; exit 1; }
+hwvault exec "$TMP/exec.env.age" -- printenv GOODVAR > "$TMP/out6" 2> "$TMP/err6"
+if [[ "$(cat "$TMP/out6")" == "hwvault-exec-ok" ]]; then
+  pass "good variables reach the child"
+else
+  fail "good variable did not reach the child:"; sed 's/^/    /' "$TMP/err6"
+fi
+if grep -q "refusing to inject PATH" "$TMP/err6" && grep -q "refusing to inject DYLD_INSERT_LIBRARIES" "$TMP/err6"; then
+  pass "PATH and DYLD_* lines refused with a warning"
+else
+  fail "refusal warnings missing:"; sed 's/^/    /' "$TMP/err6"
+fi
+
+echo
 echo "=== RESULT: $PASS passed, $FAIL failed ==="
 [[ $FAIL -eq 0 ]] || exit 1

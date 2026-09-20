@@ -195,6 +195,18 @@ ok_fails    "exec requires a command"        hv exec "$SANDBOX/a.txt.age"
 ok_contains "exec explains the missing command" "no command given" \
             "$(hv exec "$SANDBOX/a.txt.age" 2>&1 | strip_ansi)"
 ok_fails    "exec rejects a missing file"    hv exec "$SANDBOX/nope.age" -- true
+# Resolution happens BEFORE the TTY guard and BEFORE env runs the child, so
+# a command missing from PATH fails fast with a clear message instead of
+# env's baffling post-decrypt one. (PATH/DYLD_* refusal is parse-time,
+# behind decrypt — covered by RUN-THESE.sh test 6.)
+ok_fails "exec rejects a command missing from PATH" \
+         hv exec "$SANDBOX/a.txt.age" -- definitely-not-a-binary-xyz
+ok_contains "names the missing command" "command not found in PATH" \
+            "$(hv exec "$SANDBOX/a.txt.age" -- definitely-not-a-binary-xyz 2>&1 | strip_ansi)"
+out="$(hv exec "$SANDBOX/a.txt.age" -- definitely-not-a-binary-xyz 2>&1 | strip_ansi)"
+t_start "PATH check fires before the TTY guard"
+if [[ "$out" == *"command not found"* && "$out" != *"no TTY"* ]]; then t_pass
+else t_fail "got: $out"; fi
 
 echo
 echo "── status ───────────────────────────────────────────"
@@ -237,6 +249,54 @@ ok_contains "pins cover the recovery recipient" "recovery" "$_pins"
 ok_contains "status reports pins as matching" "match pins" \
             "$(hv status 2>&1 | strip_ansi)"
 
+# Absent pins on a vault WITH recipients = the exact case pins exist to catch
+# (stale vault in the wrong directory). check_pins used to return silently —
+# fail-open without a word — while pin_status warned. Both must now warn,
+# with identical text, and encrypt must still proceed (fail open, loudly).
+rm -f "$SANDBOX/recipients/pins"
+echo "unpinned-probe" > "$SANDBOX/unpinned.txt"
+ok_contains "encrypt WARNS when recipients are unpinned" "NOT pinned" \
+            "$(hv encrypt "$SANDBOX/unpinned.txt" 2>&1 | strip_ansi)"
+ok_file "unpinned encrypt still succeeds (fail open)" "$SANDBOX/unpinned.txt.age"
+ok_contains "status warns the same way" "NOT pinned" \
+            "$(hv status 2>&1 | strip_ansi)"
+# A brand-new empty vault has no recipients at all — the guard must NOT nag.
+EMPTY_VAULT="$SANDBOX/empty-vault"; mkdir -p "$EMPTY_VAULT"
+echo "fresh.txt" > "$EMPTY_VAULT/fresh.txt"
+out="$(HWVAULT_DIR="$EMPTY_VAULT" hv encrypt "$EMPTY_VAULT/fresh.txt" 2>&1 | strip_ansi)"
+t_start "empty vault encrypt does not nag about pins"
+if [[ "$out" != *"NOT pinned"* ]]; then t_pass; else t_fail "warned: $out"; fi
+# Re-running init re-records pins and clears the warning.
+hv init >/dev/null 2>&1 || true
+ok_contains "init re-records pins, clearing the warning" "match pins" \
+            "$(hv status 2>&1 | strip_ansi)"
+rm -f "$SANDBOX/unpinned.txt" "$SANDBOX/unpinned.txt.age"
+
+# A pin file whose last line lost its trailing newline (editor / hand-fix
+# during rotation) must still have its LAST pin enforced — read returns
+# non-zero at EOF even when it filled the variables with a final full line,
+# and the recovery pin is the last line write_pins emits. The old loop
+# skipped it silently: the exact failure the pins exist to prevent.
+printf '%s %s\n%s %s' "fido"     "$(shasum -a256 "$SANDBOX/recipients/fido.pub" | awk '{print $1}')" \
+                      "recovery" "$(shasum -a256 "$SANDBOX/recipients/recovery.pub" | awk '{print $1}')" \
+  > "$SANDBOX/recipients/pins"
+ok_contains "newline-stripped pins still report clean" "match pins" \
+            "$(hv status 2>&1 | strip_ansi)"
+# Tamper ONLY the recovery recipient — the last, unterminated pin line. With
+# the old loop this was silently skipped and encrypt SUCCEEDED on the
+# tampered recipient; the mismatch must now be caught.
+echo "nl-probe" > "$SANDBOX/nl-probe.txt"
+age-keygen -o "$SANDBOX/again-imposter.key" 2>&1 | grep -o 'age1[a-z0-9]*' > "$SANDBOX/recipients/recovery.pub"
+ok_fails "recovery pin mismatch caught without trailing newline (encrypt)" \
+         hv encrypt "$SANDBOX/nl-probe.txt"
+ok_contains "status catches it too" "does not match its pin" \
+            "$(hv status 2>&1 | strip_ansi)"
+# Restore the real recovery recipient (its private key is at offline.key at
+# this point in the suite) and re-pin cleanly with newlines.
+age-keygen -y "$SANDBOX/offline.key" > "$SANDBOX/recipients/recovery.pub"
+hv init >/dev/null 2>&1 || true
+rm -f "$SANDBOX/nl-probe.txt" "$SANDBOX/nl-probe.txt.age" "$SANDBOX/again-imposter.key"
+
 # Tamper: replace fido.pub with a different recipient, as a stale copy or
 # accidental regeneration would. encrypt must refuse — pin mismatch.
 # (check_pins runs before the target file is even looked at, so the pin guard
@@ -255,6 +315,22 @@ grep -o 'age1[a-z0-9]*' "$SANDBOX/recipients/fido-identity.txt" | head -1 > "$SA
 ok_succeeds "encrypt works again after restoring the pinned recipient" \
             hv encrypt "$SANDBOX/pincheck.txt"
 rm -f "$SANDBOX/pincheck.txt" "$SANDBOX/pincheck.txt.age" "$SANDBOX/imposter.key"
+
+echo
+echo "── hash-tool guard (no silent death, no empty pins) ──"
+# A missing shasum used to kill check_pins via set -e with NO message at all
+# (its stderr was swallowed by _sha), and in write_pins the failed
+# substitution sat in a printf argument, so the failure was discarded and an
+# EMPTY pin got recorded. require_hash_tool must fire loudly before either.
+STUB="$SANDBOX/stub-bin"; mkdir -p "$STUB"
+ln -s "$(command -v age)" "$STUB/age"
+echo "hash-probe" > "$SANDBOX/hashprobe.txt"
+ok_fails "encrypt fails when no hash tool is on PATH" \
+         env PATH="$STUB" "$(command -v bash)" "$HWVAULT" encrypt "$SANDBOX/hashprobe.txt"
+ok_contains "failure names the missing hash tool" "no hashing tool available" \
+            "$(env PATH="$STUB" "$(command -v bash)" "$HWVAULT" encrypt "$SANDBOX/hashprobe.txt" 2>&1 | strip_ansi)"
+ok_file "plaintext survives the guard failure" "$SANDBOX/hashprobe.txt"
+rm -f "$SANDBOX/hashprobe.txt"
 mv "$SANDBOX/offline.key" "$SANDBOX/recipients/recovery-key.txt"
 rm -f "$SANDBOX/off.txt.age"
 

@@ -2,7 +2,7 @@
 
 **Encrypt files so they can only be decrypted with a physical touch on the MiixKey.**
 
-Status: **Phases 1–3 complete, §10 gate cleared** — `hwvault` v0.2.0 on PATH, 61 tests
+Status: **Phases 1–3 complete, §10 gate cleared** — `hwvault` v0.2.0 on PATH, 75 tests
 passing, both decrypt paths verified on hardware. Phase 4 (real secrets) unblocked.
 Vault: `~/.local/share/hwvault` (local, unsynced, not a git checkout — §6 assumptions).
 Owner: Marlon Santos
