@@ -4,7 +4,7 @@
 _hwvault() {
   local -a commands
   commands=(
-    'init:set up both recipients (FIDO + backup)'
+    'init:set up both recipients (FIDO + backup) and pin them'
     'encrypt:encrypt a file to both recipients, remove plaintext'
     'decrypt:decrypt via MiixKey (PIN + touch) to stdout'
     'recover:decrypt via backup identity (no hardware)'

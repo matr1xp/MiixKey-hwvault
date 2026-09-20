@@ -88,7 +88,7 @@ command -v age >/dev/null 2>&1 || { echo "FATAL: age not installed"; exit 1; }
 
 echo "── meta ─────────────────────────────────────────────"
 ok_succeeds "runs --version"            hv --version
-ok_contains "reports version"    "0.1"  "$(hv --version)"
+ok_contains "reports version"    "0.2"  "$(hv --version)"
 ok_contains "help lists commands" "encrypt" "$(hv help)"
 ok_fails    "rejects unknown command"   hv definitely-not-a-command
 
@@ -223,6 +223,38 @@ ok_eq "init does NOT regenerate the recovery key when it is offline" \
       "$_pub_before" "$(cat "$SANDBOX/recipients/recovery.pub")"
 ok_contains "offline key still decrypts what was encrypted meanwhile" "offline-probe" \
             "$(age -d -i "$SANDBOX/offline.key" "$SANDBOX/off.txt.age" 2>/dev/null)"
+
+echo
+echo "── recipient pins (guard against stale/rotated recipients) ──"
+# init records the SHA-256 of each recipient .pub; encrypt verifies them. This
+# catches our own mistakes — a stale checkout or accidental regeneration —
+# before files get encrypted to an orphaned recipient. Assert the MECHANISM
+# (which guard fires), not just the failure.
+ok_file "init records recipient pins" "$SANDBOX/recipients/pins"
+_pins="$(cat "$SANDBOX/recipients/pins")"
+ok_contains "pins cover the fido recipient" "fido" "$_pins"
+ok_contains "pins cover the recovery recipient" "recovery" "$_pins"
+ok_contains "status reports pins as matching" "match pins" \
+            "$(hv status 2>&1 | strip_ansi)"
+
+# Tamper: replace fido.pub with a different recipient, as a stale copy or
+# accidental regeneration would. encrypt must refuse — pin mismatch.
+# (check_pins runs before the target file is even looked at, so the pin guard
+# is what fires — and the mechanism assertion below proves it.)
+echo "pinned" > "$SANDBOX/pincheck.txt"
+age-keygen -o "$SANDBOX/imposter.key" 2>&1 | grep -o 'age1[a-z0-9]*' > "$SANDBOX/recipients/fido.pub"
+ok_fails "encrypt refuses when a recipient does not match its pin" \
+         hv encrypt "$SANDBOX/pincheck.txt"
+ok_contains "refusal names the pin mismatch" "does not match its pin" \
+            "$(hv encrypt "$SANDBOX/pincheck.txt" 2>&1 | strip_ansi)"
+ok_contains "status warns about the mismatched pin" "does not match its pin" \
+            "$(hv status 2>&1 | strip_ansi)"
+# Restore the real fido.pub (the fixture identity's public key — the same way
+# bin/hwvault's init derives it) and confirm encrypt works again.
+grep -o 'age1[a-z0-9]*' "$SANDBOX/recipients/fido-identity.txt" | head -1 > "$SANDBOX/recipients/fido.pub"
+ok_succeeds "encrypt works again after restoring the pinned recipient" \
+            hv encrypt "$SANDBOX/pincheck.txt"
+rm -f "$SANDBOX/pincheck.txt" "$SANDBOX/pincheck.txt.age" "$SANDBOX/imposter.key"
 mv "$SANDBOX/offline.key" "$SANDBOX/recipients/recovery-key.txt"
 rm -f "$SANDBOX/off.txt.age"
 
@@ -236,11 +268,11 @@ echo
 echo "── isolation ────────────────────────────────────────"
 # HWVAULT_DIR must fully redirect the vault; a default-path vault must stay
 # untouched. Self-contained: a stand-in "real" vault is provisioned under a
-# fake $HOME, so the check runs on ANY machine (the old version peeked at
-# $HOME/workspace/Projects/MiixKey directly and silently skipped both tests
-# wherever that path didn't exist — e.g. CI).
+# fake $HOME, so the check runs on ANY machine (the old version peeked at a
+# hardcoded dev path and silently skipped both tests wherever that path
+# didn't exist — e.g. CI).
 FAKEHOME="$SANDBOX/fake-home"
-FAKE_REAL="$FAKEHOME/workspace/Projects/MiixKey"
+FAKE_REAL="$FAKEHOME/.local/share/hwvault"   # the default VAULT_DIR (bin/hwvault)
 mkdir -p "$FAKE_REAL/recipients"
 age-keygen -o "$FAKE_REAL/recipients/fido-identity.txt" 2>&1 \
   | grep -o 'age1[a-z0-9]*' > "$FAKE_REAL/recipients/fido.pub"

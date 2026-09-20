@@ -1,14 +1,27 @@
 # Recipients
 
+> **The live recipients now live in the vault directory** —
+> `${HWVAULT_DIR:-~/.local/share/hwvault}/recipients` — a plain local folder
+> that is **not** this git checkout and **not** cloud-synced. A `git pull`
+> here must never be able to change what files get encrypted to
+> (SPEC §6 operating assumptions). The copies of `fido.pub` / `recovery.pub`
+> in this directory are **archival**, kept so history stays intelligible; do
+> not encrypt to them directly. If they ever diverge from the vault's pinned
+> recipients, trust the vault and re-encrypt.
+
 Every file is encrypted to **two** recipients (SPEC §7): the hardware path and the
 recovery path. A single-recipient file is a single point of permanent loss.
 
 | File | What | Secret? |
 |---|---|---|
-| `fido-identity.txt` | FIDO2 credential handle | handle only — useless without the MiixKey |
-| `fido.pub` | age recipient, hardware path | no |
-| `recovery-key.txt` | plain age private key — the escape hatch (§10 ③) | **YES — this is the crown jewel** |
-| `recovery.pub` | age recipient, recovery path | no |
+| `fido.pub` | age recipient, hardware path (archival copy) | no |
+| `recovery.pub` | age recipient, recovery path (archival copy) | no |
+
+The live `fido-identity.txt` (credential handle) and `recovery-key.txt` live only
+in the **vault directory**, never in this repo. The handle is untracked and
+git-ignored here by policy — publishing it, combined with upstream's
+stolen-identity caveat, is a wider exposure than the chat transcript that
+burned the previous credential.
 
 ## `recovery-key.txt` — read this
 
@@ -28,17 +41,25 @@ accordingly:
 
 Rotated 2026-09-06. The previous key is archived at
 `~/.local/share/hwvault-old-keys/` — delete it once you are confident nothing is still
-encrypted to it.
+encrypted to it. The private key itself is **offline**; only `recovery.pub` remains on
+this machine, in the vault directory.
 
-## ⚠️ `fido-identity.txt` is a throwaway
+## ⚠️ Credential history — read before rotating
 
-The current FIDO credential was generated during Phase 1 testing and its identity string
-**passed through a chat transcript**, so it is considered burned. Not exploitable without
-the physical MiixKey + PIN, but per upstream's warning about stolen identities, do not
-reuse it for real secrets.
+The Phase-1 FIDO credential was **burned** (its identity string passed through a chat
+transcript) and was regenerated on 2026-09-06; the current identity has never left
+this machine. Per upstream's warning, a lifted identity can decrypt without the
+token — that is why the handle is machine-local and never pushed.
 
-Before Phase 4: delete `fido-identity.txt` and `fido.pub`, then run `hwvault init` in a
-real terminal to mint a fresh credential that never leaves the machine.
+**Rotation orphans.** Regenerating a recipient **orphans every file already
+encrypted to the old one** — they become recoverable only via the remaining
+recipient, which defeats §7. If you must rotate:
+
+1. Consciously delete the vault's `recipients/pins` file first — `hwvault init`
+   hard-fails while the pins point at the old recipients.
+2. Run `hwvault init` in a real terminal (PIN + touch) to mint the new credential.
+3. Re-encrypt **every** vault file to both new recipients.
+4. Regenerate the committed canary (`test/verify.txt.age`) to the new recipients.
 
 ## Rotating a key
 

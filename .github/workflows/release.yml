@@ -68,7 +68,7 @@ jobs:
             echo "hwvault $TAG"
             echo "commit: $GITHUB_SHA"
             echo "built:  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "tests:  test/test_hwvault.sh (unattended suite, 53 assertions)"
+            echo "tests:  test/test_hwvault.sh (unattended suite, 61 assertions)"
           } > dist/hwvault.provenance
           cat dist/hwvault.sha256
           cat dist/hwvault.provenance
@@ -103,7 +103,7 @@ jobs:
 
           Release artifact: \`hwvault\` — the single-file CLI (\`bin/hwvault\` at tag ${TAG}).
 
-          This release passed the unattended test suite (53 assertions,
+          This release passed the unattended test suite (61 assertions,
           \`test/test_hwvault.sh\`) before publishing. The FIDO hardware paths
           (PIN + touch) are verified separately on-device via \`test/RUN-THESE.sh\`;
           see SPEC §9 for why they cannot run in CI.

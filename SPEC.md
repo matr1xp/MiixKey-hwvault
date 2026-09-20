@@ -2,8 +2,9 @@
 
 **Encrypt files so they can only be decrypted with a physical touch on the MiixKey.**
 
-Status: **Phases 1–3 complete, §10 gate cleared** — `hwvault` v0.1.0 on PATH, 53 tests
+Status: **Phases 1–3 complete, §10 gate cleared** — `hwvault` v0.2.0 on PATH, 61 tests
 passing, both decrypt paths verified on hardware. Phase 4 (real secrets) unblocked.
+Vault: `~/.local/share/hwvault` (local, unsynced, not a git checkout — §6 assumptions).
 Owner: Marlon Santos
 Created: 2026-09-06
 
@@ -170,6 +171,38 @@ Secrets reach the child process through the environment and never land on disk.
 This is a **defense-in-depth** control that decisively raises the cost of remote and
 offline attacks. It is not a defense against a live compromise of the running machine.
 
+### Operating assumptions — part of the threat model, not deployment trivia
+
+The guarantees above depend on four **environmental** assumptions. If any breaks,
+the threat model changes; re-read §6 before continuing.
+
+1. **The vault folder is local, unsynced, and not a git checkout.** The vault lives at
+   `${HWVAULT_DIR:-~/.local/share/hwvault}` — never inside iCloud Drive, Dropbox,
+   Google Drive, or any other sync root, and never inside a git working tree. A
+   `git pull` into the vault is indistinguishable from an attacker rewriting
+   recipient material, because that is exactly what it would be. Syncing the vault
+   does not leak ciphertext (still age-encrypted) but silently widens who can
+   change what gets encrypted *to*.
+2. **Write access to the vault counts as a host compromise.** Anyone who can write
+   `recipients/fido.pub` can orphan or redirect encryption — the crypto never gets
+   a chance to matter. Treat vault-write integrity as you would treat malware:
+   if an untrusted process wrote there, rotate and re-encrypt.
+3. **AI agents on this host can write files but must never write the vault.**
+   The realistic writer is an agent session (Claude Code, etc.) — its TTY check
+   keeps it from *decrypting*, but a prompt injection could still get it to
+   *edit files*. Enforced two ways on this machine: (a) the Claude Code sandbox
+   (Seatbelt) `denyWrite` list covers the vault, `~/.local/bin`, and shell
+   startup files for every Bash subprocess, with unsandboxed fallback disabled;
+   (b) tool-layer deny rules cover the built-in Edit/Read tools for the same
+   paths. Re-check the current Claude Code docs before relying on this —
+   permission-rule and sandbox syntax evolve between versions.
+4. **Recipients are pinned (`recipients/pins`).** `hwvault init` records the
+   SHA-256 of each recipient `.pub`; `encrypt`/`init` hard-fail on mismatch and
+   `status` warns. This is not an attacker control — an attacker with vault write
+   access rewrites the pin file too — it catches **our own mistakes**: a stale
+   checkout, a wrong-directory re-init, or an accidental regeneration, any of
+   which would silently orphan every file encrypted to the real recipient.
+
 ## 7. Recovery — the part that must not be an afterthought
 
 Hardware-bound encryption fails catastrophically and irreversibly when the hardware is
@@ -275,8 +308,8 @@ overwriting blocks does not guarantee the plaintext is unrecoverable. `encrypt` 
 explicitly rather than implying a guarantee it cannot make.
 
 ### Phase 3 — Ergonomics
-- [ ] `exec` — env injection into a subprocess
-- [ ] `edit` — tmpfs round-trip, never writing plaintext to persistent storage
+- [x] `exec` — env injection into a subprocess
+- [x] `edit` — tmpfs round-trip, never writing plaintext to persistent storage
 - [x] Shell completions — zsh, symlinked into `~/.oh-my-zsh/completions/_hwvault`
 
 ### Phase 4 — Adoption ✅ UNBLOCKED (gate cleared 2026-09-06)

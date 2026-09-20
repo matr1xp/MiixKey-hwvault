@@ -96,7 +96,7 @@ ships v1.0.0.
 
 ## Testing
 
-- `test/test_hwvault.sh` — 53 assertions, fully unattended, runs in an isolated
+- `test/test_hwvault.sh` — 61 assertions, fully unattended, runs in an isolated
   sandbox (`HWVAULT_DIR`) so it never touches real recipients. Mutation-tested: two
   initially-undetected mutations (a weakened guard, a removed verification step) are
   now explicitly covered.
@@ -118,8 +118,11 @@ bash test/RUN-THESE.sh           # real terminal + key plugged in
 
 ## Status
 
-v0.1.0 — Phases 1–3 complete (build, vault, ergonomics), dependency-maturity gate
-cleared, both decrypt paths verified on hardware. See [SPEC.md §8](SPEC.md) for the
+v0.2.0 — Phases 1–3 complete (build, vault, ergonomics), dependency-maturity gate
+cleared, both decrypt paths verified on hardware. The vault lives at
+`~/.local/share/hwvault` — a local, unsynced folder, never a git checkout
+(SPEC §6 operating assumptions) — and recipients are pinned against accidental
+rotation. v0.1.0 — initial release. See [SPEC.md §8](SPEC.md) for the
 phase ledger and what remains before real secrets are migrated onto it.
 
 ## License

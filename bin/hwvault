@@ -5,15 +5,21 @@
 # while always keeping a plugin-independent recovery recipient (SPEC §7, §10).
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 # ---------------------------------------------------------------- config ----
-VAULT_DIR="${HWVAULT_DIR:-$HOME/workspace/Projects/MiixKey}"
+# The vault is DATA, not code: a plain local directory that is never a git
+# checkout (a pull could rewrite recipient material from outside) and never
+# inside a cloud-synced folder. Write access to it counts as host compromise
+# (SPEC §6 operating assumptions). HWVAULT_DIR overrides for tests and
+# multi-vault setups.
+VAULT_DIR="${HWVAULT_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/hwvault}"
 RECIP_DIR="$VAULT_DIR/recipients"
 FIDO_PUB="$RECIP_DIR/fido.pub"
 FIDO_ID="$RECIP_DIR/fido-identity.txt"
 RECOVERY_PUB="$RECIP_DIR/recovery.pub"
 RECOVERY_ID="$RECIP_DIR/recovery-key.txt"
+PIN_FILE="$RECIP_DIR/pins"
 
 # ------------------------------------------------------------------ ui ------
 readonly C_RED=$'\033[31m' C_GRN=$'\033[32m' C_YEL=$'\033[33m' C_DIM=$'\033[2m' C_OFF=$'\033[0m'
@@ -54,10 +60,74 @@ count_stanzas() {  # how many recipients can open this file
   head -c 4096 "$1" 2>/dev/null | LC_ALL=C grep -c '^-> ' || true
 }
 
+# ----------------------------------------------------- recipient pins ------
+# init records the SHA-256 of each recipient .pub; every encryption verifies
+# them. This is NOT an attacker control — the pin file sits next to the
+# recipients, so an attacker with write access rewrites both. It catches OUR
+# OWN mistakes: a stale copy of a recipient (old checkout, wrong directory)
+# or an accidental regeneration, either of which would silently orphan every
+# file encrypted to the real one (SPEC §7 rotation-orphan rule).
+_sha() { shasum -a256 "$1" 2>/dev/null | awk '{print $1}'; }
+
+write_pins() {
+  : > "$PIN_FILE"; chmod 644 "$PIN_FILE"
+  [[ -s "$FIDO_PUB"     ]] && printf 'fido %s\n'     "$(_sha "$FIDO_PUB")"     >>"$PIN_FILE"
+  [[ -s "$RECOVERY_PUB" ]] && printf 'recovery %s\n' "$(_sha "$RECOVERY_PUB")" >>"$PIN_FILE"
+}
+
+check_pins() {  # hard-fail: used by init / encrypt / edit
+  [[ -s "$PIN_FILE" ]] || return 0
+  local name want file have
+  while read -r name want; do
+    [[ -n "$name" ]] || continue
+    file="$RECIP_DIR/$name.pub"
+    if [[ ! -s "$file" ]]; then
+      die "pin exists for '$name' but $file is missing — restore the recipient,
+or, if this is a deliberate rotation, delete $PIN_FILE consciously, then
+re-encrypt EVERYTHING to the new recipients (SPEC §7)."
+    fi
+    have="$(_sha "$file")"
+    [[ "$have" == "$want" ]] || die "$file does not match its pin.
+  pinned:  $want
+  actual:  $have
+A changed or stale recipient silently orphans files encrypted to the old one.
+If this is a deliberate rotation: delete $PIN_FILE, run 'hwvault init', then
+re-encrypt all vault files to the new recipients (SPEC §7)."
+  done < "$PIN_FILE"
+}
+
+pin_status() {  # soft version for status: warns, never dies
+  if [[ ! -s "$PIN_FILE" ]]; then
+    warn "recipients are NOT pinned — run 'hwvault init' to record them
+(guards against stale or accidentally regenerated recipients)"
+    return
+  fi
+  local name want file have bad=0
+  while read -r name want; do
+    [[ -n "$name" ]] || continue
+    file="$RECIP_DIR/$name.pub"
+    if [[ ! -s "$file" ]]; then
+      warn "pin exists for '$name' but $file is missing — rotation in progress?"
+      bad=1; continue
+    fi
+    have="$(_sha "$file")"
+    if [[ "$have" != "$want" ]]; then
+      warn "$file does not match its pin — stale or regenerated recipient (SPEC §7)"
+      bad=1
+    fi
+  done < "$PIN_FILE"
+  (( bad )) || ok "recipients match pins ($PIN_FILE)"
+}
+
 # ------------------------------------------------------------ commands ------
 cmd_init() {
   need age; need age-keygen
   mkdir -p "$RECIP_DIR"
+
+  # Refuse up front if what's on disk is not what we pinned — a mismatch here
+  # means stale or regenerated recipients, and everything after would build
+  # on the wrong keys.
+  check_pins
 
   # The recovery PRIVATE key is expected to be absent once it has been moved
   # offline (SPEC §10 ③) — that is the goal state, not a missing file. Only the
@@ -99,14 +169,16 @@ EOF
     ok "FIDO recipient: $(cat "$FIDO_PUB")"
   fi
 
+  write_pins
   echo
-  recipient_args >/dev/null && ok "init complete — 2 recipients configured"
+  recipient_args >/dev/null && ok "init complete — 2 recipients configured (pins recorded)"
   warn "keep $RECOVERY_ID offline (print it, or store on removable media) before"
   warn "trusting this vault with anything irreplaceable — SPEC §10 gate"
 }
 
 cmd_encrypt() {
   need age
+  check_pins
   local src="${1:?usage: hwvault encrypt <file>}"
   [[ -f "$src" ]] || die "no such file: $src"
   [[ "$src" == *.age ]] && die "already encrypted: $src"
@@ -161,6 +233,7 @@ cmd_recover() {
 
 cmd_edit() {
   need age
+  check_pins
   local enc="${1:?usage: hwvault edit <file.age>}"
   [[ -f "$enc" ]] || die "no such file: $enc"
   require_tty
@@ -261,6 +334,7 @@ cmd_status() {
                          || printf '  %s✗%s fido    missing\n' "$C_RED" "$C_OFF"
   [[ -s "$RECOVERY_PUB" ]] && printf '  %s✓%s recovery %s\n' "$C_GRN" "$C_OFF" "$(cat "$RECOVERY_PUB")" \
                          || printf '  %s✗%s recovery missing\n' "$C_RED" "$C_OFF"
+  pin_status
   echo
 
   echo "Hardware:"
@@ -307,15 +381,17 @@ usage() {
   cat <<EOF
 hwvault $VERSION — hardware-bound secrets vault
 
-  hwvault init                 set up both recipients (FIDO + backup)
+  hwvault init                 set up both recipients (FIDO + backup) + pin them
   hwvault encrypt <file>       encrypt to both recipients, remove plaintext
   hwvault decrypt <file.age>   decrypt via MiixKey (PIN + touch) → stdout
   hwvault edit <file.age>      decrypt → \$EDITOR → re-encrypt
   hwvault exec <file.age> -- <cmd>
                                inject KEY=VALUE lines as env vars into <cmd>
   hwvault recover <file.age>   decrypt via backup identity (no hardware)
-  hwvault status               tooling, recipients, hardware, recipient audit
+  hwvault status               tooling, recipients, pins, hardware, audit
 
+Vault: \${HWVAULT_DIR:-~/.local/share/hwvault} — local, unsynced, never a git
+checkout (SPEC §6 operating assumptions).
 Decrypt requires a real terminal for the PIN prompt.
 See SPEC.md for the threat model (§6), recovery policy (§7) and the
 pre-1.0 dependency gate (§10).

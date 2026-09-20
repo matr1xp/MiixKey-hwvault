@@ -19,8 +19,13 @@ fail() { echo "❌ FAIL: $*"; FAIL=$((FAIL+1)); }
 for tool in age; do
   command -v "$tool" >/dev/null 2>&1 || { echo "missing tool: $tool"; exit 1; }
 done
-for f in recipients/fido.pub recipients/fido-identity.txt recipients/recovery.pub; do
-  [[ -s "$f" ]] || { echo "missing $f — run 'hwvault init' first"; exit 1; }
+# Recipients live in the VAULT directory — a plain local dir that is never
+# this repo checkout and never cloud-synced (SPEC §6 operating assumptions).
+# Resolve the same way bin/hwvault does; keep in sync with its config block.
+VAULT="${HWVAULT_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/hwvault}"
+R="$VAULT/recipients"
+for f in "$R/fido.pub" "$R/fido-identity.txt" "$R/recovery.pub"; do
+  [[ -s "$f" ]] || { echo "missing $f — run 'hwvault init' first (vault: $VAULT)"; exit 1; }
 done
 
 # ---------------------------------------------------------- fixtures --------
@@ -31,9 +36,9 @@ CANARY="$TMP/canary.txt"
 echo "hwvault hardware verification $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$CANARY"
 
 echo "Generating fixtures from current recipients (no hardware needed)…"
-age -R recipients/fido.pub -R recipients/recovery.pub -o "$TMP/dual.age" "$CANARY" \
+age -R "$R/fido.pub" -R "$R/recovery.pub" -o "$TMP/dual.age" "$CANARY" \
   || { echo "could not generate dual-recipient fixture"; exit 1; }
-age -R recipients/fido.pub -o "$TMP/fido-only.age" "$CANARY" \
+age -R "$R/fido.pub" -o "$TMP/fido-only.age" "$CANARY" \
   || { echo "could not generate FIDO-only fixture"; exit 1; }
 
 # ---------------------------------------------------------------- tests ------
@@ -41,7 +46,7 @@ echo
 echo "=== TEST 1: FIDO decrypt of dual-recipient file (plug key in; PIN + touch) ==="
 # NOTE: keep stdout and stderr SEPARATE — the plugin prints touch/PIN chatter
 # to stderr, and merging it into the captured plaintext breaks the cmp.
-if age -d -i recipients/fido-identity.txt "$TMP/dual.age" > "$TMP/out1" 2> "$TMP/err1"; then
+if age -d -i "$R/fido-identity.txt" "$TMP/dual.age" > "$TMP/out1" 2> "$TMP/err1"; then
   cmp -s "$CANARY" "$TMP/out1" && pass "FIDO decrypt, dual-recipient" \
         || { fail "FIDO decrypt, dual-recipient — wrong plaintext:"; sed 's/^/    /' "$TMP/err1"; }
 else
@@ -50,7 +55,7 @@ fi
 
 echo
 echo "=== TEST 2: FIDO decrypt of FIDO-only file (PIN + touch) ==="
-if age -d -i recipients/fido-identity.txt "$TMP/fido-only.age" > "$TMP/out2" 2> "$TMP/err2"; then
+if age -d -i "$R/fido-identity.txt" "$TMP/fido-only.age" > "$TMP/out2" 2> "$TMP/err2"; then
   cmp -s "$CANARY" "$TMP/out2" && pass "FIDO decrypt, FIDO-only" \
         || { fail "FIDO decrypt, FIDO-only — wrong plaintext:"; sed 's/^/    /' "$TMP/err2"; }
 else
@@ -63,7 +68,7 @@ read -r -p "Unplug the key now, then press Enter..." || true
 if [[ ! -t 0 ]]; then
   echo "⚠️  skipped — no interactive stdin (run from a real terminal to verify this)"
 else
-  if age -d -i recipients/fido-identity.txt "$TMP/fido-only.age" > "$TMP/out3" 2> "$TMP/err3"; then
+  if age -d -i "$R/fido-identity.txt" "$TMP/fido-only.age" > "$TMP/out3" 2> "$TMP/err3"; then
     fail "decrypted WITHOUT hardware — hardware binding is broken!"
   else
     pass "correctly failed without hardware:"; sed 's/^/    /' "$TMP/err3"
@@ -93,14 +98,13 @@ fi
 
 echo
 echo "=== TEST 5: committed canary test/verify.txt.age still decrypts ==="
-if age -d -i recipients/fido-identity.txt test/verify.txt.age > "$TMP/out5" 2> "$TMP/err5"; then
+if age -d -i "$R/fido-identity.txt" test/verify.txt.age > "$TMP/out5" 2> "$TMP/err5"; then
   pass "committed canary decrypts via current credential:"; sed 's/^/    /' "$TMP/out5"
 else
   echo "⚠️  could not decrypt with current credential — likely encrypted to a"
-  echo "    pre-rotation credential. Regenerate it: hwvault encrypt after"
-  echo "    printing its plaintext is not needed; simply replace it with a fresh"
-  echo "    canary:  age -R recipients/fido.pub -R recipients/recovery.pub \\"
-  echo "              -o test/verify.txt.age <(echo 'canary')"
+  echo "    pre-rotation credential. Regenerate the canary from the vault's"
+  echo "    CURRENT recipients:"
+  echo "      age -R \"$R/fido.pub\" -R \"$R/recovery.pub\" -o test/verify.txt.age <(echo 'canary')"
 fi
 
 echo
