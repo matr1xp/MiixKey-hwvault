@@ -201,8 +201,23 @@ EOF
     [[ "$reply" =~ ^[Yy]$ ]] || die "aborted"
     age-plugin-fido2-hmac -g > "$FIDO_ID"
     chmod 600 "$FIDO_ID"
-    grep -o 'age1[a-z0-9]*' "$FIDO_ID" | head -1 > "$FIDO_PUB"
+    # The plugin writes the canonical recipient on its own '# public key:'
+    # line. Do NOT grep -o 'age1[a-z0-9]*' — recipients of the newer
+    # credentials start 'age1fido2-hmac1…' and that pattern truncates at
+    # the dash (a real failure during the 2026-09-20 rotation: fido.pub
+    # became the 10 bytes 'age1fido2' and init pinned the garbage).
+    # NOTE: must not match the '# public key (pq safe):' line.
+    grep '^# public key: ' "$FIDO_ID" | head -1 | sed 's/^# public key: //' > "$FIDO_PUB"
     [[ -s "$FIDO_PUB" ]] || die "could not extract recipient from generated identity"
+    [[ "$(cat "$FIDO_PUB")" == age1* ]] || die "extracted recipient does not look like an age recipient: $(cat "$FIDO_PUB")"
+    # Separate-identity mode is mandatory for this vault: in no-identity mode
+    # the credential handle is embedded in every ciphertext header — linkable,
+    # and the handle leaves the machine with every file (recipients/README.md
+    # policy). If the 'separate identity?' prompt was answered 'n', refuse.
+    grep -q '^AGE-PLUGIN-FIDO2-HMAC-' "$FIDO_ID" || die "credential was created WITHOUT a separate identity.
+  Answer 'y' to 'Are you fine with having a separate identity?' — no-identity
+  mode embeds the handle in every ciphertext header (linkable, not
+  machine-local). Delete $FIDO_ID and re-run 'hwvault init'."
     ok "FIDO recipient: $(cat "$FIDO_PUB")"
   fi
 
